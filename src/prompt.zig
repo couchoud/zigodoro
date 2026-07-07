@@ -6,15 +6,15 @@ pub const Prompt = struct {
     reader: *std.Io.Reader,
     pub fn clear(self: *Prompt) !void {
         try ansi.clear.screen(self.writer);
-        try ansi.cursor.show(self.writer);
+        try self.writer.flush();
     }
     pub fn message_replace(self: *Prompt, value: []const u8) !void {
-        try self.writer.print("\r{s}", .{value});
+        try self.writer.print("\r\x1b[K{s}", .{value});
         try ansi.cursor.hide(self.writer);
         try self.writer.flush();
     }
     pub fn message(self: *Prompt, value: []const u8) !void {
-        try self.writer.print("{s}\n", .{value});
+        try self.writer.print("{s}", .{value});
         try ansi.cursor.hide(self.writer);
         try self.writer.flush();
     }
