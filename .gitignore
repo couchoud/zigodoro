@@ -1,0 +1,7 @@
+.zig-cache/
+zig-out/
+/release/
+/debug/
+/build/
+/build-*/
+.DS_store
