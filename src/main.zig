@@ -90,7 +90,7 @@ fn handleEvent(event: Event) !void {
                     if (confirmed) {
                         try handleEvent(Event.run_start);
                     } else {
-                        exit();
+                        try exit();
                     }
                 },
                 .prompt_task => {
@@ -107,7 +107,7 @@ fn handleEvent(event: Event) !void {
         .run => {
             switch (event) {
                 .run_end => {
-                    try prompt.message_replace("Timer Complete");
+                    try prompt.message_replace("Timer Complete\n");
                     current_state = State.idle;
                     try handleEvent(Event.prompt_task);
                 },
@@ -120,8 +120,9 @@ fn handleEvent(event: Event) !void {
     }
 }
 
-fn exit() void {
-    std.process.exit(1);
+fn exit() !void {
+    try prompt.message("Goodbye! Stay productive. 👋\n");
+    std.process.exit(0);
 }
 
 fn handleTimerProgress(seconds: i64) !void {
