@@ -5,16 +5,40 @@ const ansi = @import("./ansi.zig").ansi;
 const Prompt = @import("./prompt.zig").Prompt;
 const Timer = @import("./timer.zig").Timer;
 
+const StateMachine = @import("./state.zig").StateMachine;
+const State = @import("./state.zig").State;
+const Event = @import("./state.zig").Event;
+const Action = @import("./state.zig").Action;
+
+const EventDispatcher = @import("./event_dispatcher.zig").EventDispatcher;
+
 const TimerError = error{ InvalidTimeFormat, MaxDurationExceeded };
 const TimeStruct = struct { minutes: u8, seconds: u8 };
+const Context = struct { duration: i64 = 0 };
 
-const State = enum { idle, run, end };
-const Event = enum { prompt_time, prompt_start, prompt_task, prompt_continue, prompt_exit, prompt_stop, run_start, run_pause, run_exit, run_end };
-
-var current_state: State = State.idle;
-var prompt: Prompt = undefined;
-var timer: Timer = undefined;
-var interval: ?i64 = null;
+const TimerListener = struct {
+    timer: *Timer,
+    prompt: *Prompt,
+    event_queue: *std.ArrayList(Event),
+    pub fn handleEvent(self: *TimerListener, event: []const u8) void {
+        if (std.mem.eql(u8, event, "progress")) {
+            if (self.timer.remaining == 0) {
+                // Note: Use allocator catch or change function signature to return errors
+                self.event_queue.append(undefined, Event.end) catch {};
+            }
+            self.writeTimer() catch |err| {
+                std.debug.print("TimerListener#handleEvent > writeTimer error: {}", .{err});
+            };
+        }
+    }
+    fn writeTimer(self: *TimerListener) !void {
+        const seconds = self.timer.remaining;
+        const ms = try convertSecondsToTimeStruct(seconds);
+        var buffer: [100]u8 = undefined;
+        const message = try std.fmt.bufPrint(&buffer, "Time Remaining: {:0>2}:{:0>2}", ms);
+        try self.prompt.message_replace(message);
+    }
+};
 
 pub fn main(init: std.process.Init) !void {
     // This is appropriate for anything that lives as long as the process.
@@ -22,9 +46,9 @@ pub fn main(init: std.process.Init) !void {
 
     // Accessing command line arguments:
     const args = try init.minimal.args.toSlice(arena);
-    for (args) |arg| {
-        std.log.info("arg: {s}", .{arg});
-    }
+    //for (args) |arg| {
+    //    std.log.info("arg: {s}", .{arg});
+    //}
 
     const io = init.io;
 
@@ -37,107 +61,87 @@ pub fn main(init: std.process.Init) !void {
     const stdin_reader = &stdin_file_reader.interface;
     try stdout_writer.flush();
 
-    prompt = Prompt{ .reader = stdin_reader, .writer = stdout_writer };
-    timer = Timer{ .io = io, .progress = handleTimerProgress };
+    var event_buffer: [16]Event = undefined;
+    var event_queue = std.ArrayList(Event).initBuffer(&event_buffer);
+
+    var action_buffer: [16]Action = undefined;
+    var action_queue = std.ArrayList(Action).initBuffer(&action_buffer);
+
+    var prompt = Prompt{ .reader = stdin_reader, .writer = stdout_writer };
+    var dispatcher = EventDispatcher.init(arena);
+    defer dispatcher.deinit();
+    var timer = Timer{ .io = io, .dispatcher = &dispatcher };
+    var context = Context{};
+    var sm = StateMachine{};
+    var timerListener = TimerListener{ .timer = &timer, .prompt = &prompt, .event_queue = &event_queue };
 
     const timestamp = if (args.len > 1) args[1] else null;
 
     if (timestamp) |time| {
-        const seconds = try parseAndValidateTime(time);
-        try timer.start(seconds);
-        try handleEvent(Event.run_start);
+        context.duration = try parseAndValidateTime(time);
+        sm.state = State.running;
+        try event_queue.append(undefined, .start);
     } else {
-        try handleEvent(Event.prompt_time);
+        sm.state = State.idle;
+        try event_queue.append(undefined, .start);
     }
 
-    while (current_state != State.end) {}
-}
+    var index: usize = 0;
+    while (index < event_queue.items.len) {
+        const current_event = event_queue.items[index];
+        index += 1;
 
-fn handleEvent(event: Event) !void {
-    switch (current_state) {
-        .idle => {
-            switch (event) {
-                .run_start => {
-                    if (interval) |seconds| {
-                        current_state = State.run;
-                        try writeClock(seconds);
-                        timer.stop();
-                        try timer.start(seconds);
+        std.debug.print("\n[Current State: {s}] Handling Event: {s}\n", .{ @tagName(sm.state), @tagName(current_event) });
+
+        try sm.handleEvent(current_event, &event_queue, &action_queue);
+
+        if (sm.state == State.running) {
+            switch (current_event) {
+                .start => {
+                    if (context.duration > 0) {
+                        try timer.dispatcher.addListener(TimerListener, &timerListener, TimerListener.handleEvent);
+                        try timer.start(context.duration);
                     } else {
-                        try handleEvent(Event.prompt_time);
+                        try sm.handleEvent(Event.invalid_time, &event_queue, &action_queue);
                     }
                 },
-                .prompt_time => {
-                    timer.stop();
-                    const result = try prompt.input("Enter time (MM:SS)");
-                    interval = try parseAndValidateTime(result);
-                    try handleEvent(Event.prompt_start);
-                },
-                .prompt_start => {
-                    if (interval != null) {
-                        const confirmed = try prompt.confirm("Start timer?");
-                        if (confirmed) {
-                            try handleEvent(Event.run_start);
-                        } else {
-                            try handleEvent(Event.prompt_time);
-                        }
-                    } else {
-                        try handleEvent(Event.prompt_time);
-                    }
-                },
-                .prompt_continue => {
-                    const confirmed = try prompt.confirm("Run again?");
-                    if (confirmed) {
-                        try handleEvent(Event.run_start);
-                    } else {
-                        try exit();
-                    }
-                },
-                .prompt_task => {
-                    const response = try prompt.input("Enter task");
-                    const success = try writeTask(response);
-                    if (success) {
-                        try handleEvent(Event.prompt_continue);
-                    }
-                },
-                .prompt_exit => {},
                 else => {},
             }
-        },
-        .run => {
-            switch (event) {
-                .run_end => {
-                    try prompt.message_replace("Timer Complete\n");
-                    current_state = State.idle;
-                    try handleEvent(Event.prompt_task);
+        }
+
+        while (action_queue.items.len > 0) {
+            // Pop the action
+            const current_action = action_queue.items[action_queue.items.len - 1];
+            action_queue.items.len -= 1;
+
+            switch (current_action) {
+                .prompt_user => |payload| {
+                    const result = try prompt.input(payload.message);
+                    if (sm.state == State.waiting_for_time) {
+                        const time = try parseAndValidateTime(result);
+                        context.duration = time;
+                    }
+                    try event_queue.append(undefined, Event.success);
                 },
-                .run_pause => {},
-                .run_exit => {},
+                .confirm_user => |payload| {
+                    const result = try prompt.confirm(payload.message);
+                    if (result) {
+                        try event_queue.append(undefined, Event.success);
+                    } else {
+                        try event_queue.append(undefined, Event.success);
+                    }
+                },
                 else => {},
             }
-        },
-        .end => {},
+        }
     }
+
+    // while (current_state != State.end) {}
 }
 
-fn exit() !void {
+fn exit(prompt: *Prompt) !void {
     try prompt.message("Goodbye! Stay productive. 👋\n");
     std.process.exit(0);
-}
-
-fn handleTimerProgress(seconds: i64) !void {
-    if (seconds == 0) {
-        try handleEvent(Event.run_end);
-    } else {
-        try writeClock(seconds);
-    }
-}
-
-fn writeClock(seconds: i64) !void {
-    const ms = try convertSecondsToTimeStruct(seconds);
-    var buffer: [100]u8 = undefined;
-    const message = try std.fmt.bufPrint(&buffer, "Time Remaining: {:0>2}:{:0>2}", ms);
-    try prompt.message_replace(message);
 }
 
 fn writeTask(task: []const u8) !bool {
@@ -168,54 +172,3 @@ fn parseAndValidateTime(time_str: []const u8) !i64 {
     const min_seconds = minutes * @as(i64, std.time.s_per_min);
     return seconds + min_seconds;
 }
-
-// fn resetOut(writer: *std.Io.Writer) !void {
-//     try ansi.clear.screen(writer);
-//     try ansi.cursor.show(writer);
-// }
-//
-// fn promptInput(settings: Settings) !void {
-//     try resetOut(settings.writer);
-//     try settings.writer.writeAll("Enter time (MM:SS): ");
-//     try settings.writer.flush();
-//     const user_input = try settings.reader.takeDelimiterExclusive('\n');
-//     const cleaned_input = std.mem.trim(u8, user_input, "\r");
-//
-//     current_settings = Settings{ .time = cleaned_input, .reader = settings.reader, .writer = settings.writer, .io = settings.io };
-//     handleEvent(Event.run_start, current_settings);
-// }
-//
-// fn promptTask(settings: Settings) !bool {
-//     try resetOut(settings.writer);
-//     try settings.writer.writeAll("Enter task: ");
-//     try settings.writer.flush();
-//     const user_input = try settings.reader.takeDelimiterExclusive('\n');
-//     const cleaned_input = std.mem.trim(u8, user_input, "\r");
-//
-//     try settings.writer.print("Hello, {s}!\n", .{cleaned_input});
-//     try settings.writer.flush();
-//
-//     return true;
-// }
-//
-// fn promptContinue(settings: Settings) !bool {
-//     try resetOut(settings.writer);
-//     try settings.writer.writeAll("Continue (y/n)?: ");
-//     try settings.flush();
-//     const user_input = try settings.reader.takeDelimiterExclusive('\n');
-//     const cleaned_input = std.mem.trim(u8, user_input, "\r");
-//
-//     if (std.mem.eql(u8, cleaned_input, "y") or std.mem.eql(u8, cleaned_input, "yes")) {
-//         return true;
-//     } else {
-//         return false;
-//     }
-// }
-//
-// fn startTimer(settings: Settings) !void {
-//     if (settings.time) |stamp| {
-//         try ansi.clear.screen(settings.writer);
-//         try ansi.cursor.hide(settings.writer);
-//         try timer.runTimer(stamp, settings.io, settings.writer);
-//     }
-// }
