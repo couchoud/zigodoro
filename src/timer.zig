@@ -1,5 +1,5 @@
 const std = @import("std");
-const ansi = @import("./ansi.zig").ansi;
+const EventDispatcher = @import("./event_dispatcher.zig").EventDispatcher;
 
 pub const TimeStruct = struct { minutes: u8, seconds: u8 };
 const TimerState = enum { idle, running, paused };
@@ -9,12 +9,13 @@ pub const Timer = struct {
     remaining: i64 = 0,
     state: TimerState = TimerState.idle,
     io: std.Io,
-    progress: *const fn (i64) anyerror!void,
+    dispatcher: *EventDispatcher,
     pub fn start(self: *Timer, seconds: i64) !void {
         self.duration = @intCast(seconds);
+        self.remaining = @intCast(seconds);
         const start_time = std.Io.Clock.now(.awake, self.io);
-        self.remaining = std.math.maxInt(i64);
         self.state = TimerState.running;
+        self.dispatcher.dispatch("progress");
         while (self.state == .running) {
             if (self.remaining == 0) {
                 self.state = TimerState.idle;
@@ -23,11 +24,12 @@ pub const Timer = struct {
                 const now = start_time.untilNow(self.io, .awake);
                 const now_seconds: i64 = @intCast(now.toSeconds());
                 self.remaining = self.duration - now_seconds;
-                try self.progress(self.remaining);
+                self.dispatcher.dispatch("progress");
             }
         }
     }
     pub fn stop(self: *Timer) void {
+        self.dispatcher.dispatch("stop");
         self.state = TimerState.idle;
         self.remaining = undefined;
     }
@@ -37,5 +39,6 @@ pub const Timer = struct {
         } else if (self.state == TimerState.paused) {
             self.state = .running;
         }
+        self.dispatcher.dispatch("pause");
     }
 };
