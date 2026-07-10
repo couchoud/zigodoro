@@ -2,7 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 
 const ansi = @import("./ansi.zig").ansi;
-const Prompt = @import("./prompt.zig").Prompt;
+const Display = @import("./display.zig").Display;
 const Timer = @import("./timer.zig").Timer;
 
 const StateMachine = @import("./state.zig").StateMachine;
@@ -18,7 +18,7 @@ const Context = struct { duration: i64 = 0 };
 
 const TimerListener = struct {
     timer: *Timer,
-    prompt: *Prompt,
+    display: *Display,
     event_queue: *std.ArrayList(Event),
     pub fn handleEvent(self: *TimerListener, event: []const u8) void {
         if (std.mem.eql(u8, event, "progress")) {
@@ -36,7 +36,7 @@ const TimerListener = struct {
         const ms = try convertSecondsToTimeStruct(seconds);
         var buffer: [100]u8 = undefined;
         const message = try std.fmt.bufPrint(&buffer, "Time Remaining: {:0>2}:{:0>2}", ms);
-        try self.prompt.message_replace(message);
+        try self.display.message_replace(message);
     }
 };
 
@@ -67,13 +67,13 @@ pub fn main(init: std.process.Init) !void {
     var action_buffer: [16]Action = undefined;
     var action_queue = std.ArrayList(Action).initBuffer(&action_buffer);
 
-    var prompt = Prompt{ .reader = stdin_reader, .writer = stdout_writer };
+    var display = Display{ .reader = stdin_reader, .writer = stdout_writer };
     var dispatcher = EventDispatcher.init(arena);
     defer dispatcher.deinit();
     var timer = Timer{ .io = io, .dispatcher = &dispatcher };
     var context = Context{};
     var sm = StateMachine{};
-    var timerListener = TimerListener{ .timer = &timer, .prompt = &prompt, .event_queue = &event_queue };
+    var timerListener = TimerListener{ .timer = &timer, .display = &display, .event_queue = &event_queue };
 
     const timestamp = if (args.len > 1) args[1] else null;
 
@@ -116,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
 
             switch (current_action) {
                 .prompt_user => |payload| {
-                    const result = try prompt.input(payload.message);
+                    const result = try display.input(payload.message);
                     if (sm.state == State.waiting_for_time) {
                         const time = try parseAndValidateTime(result);
                         context.duration = time;
@@ -124,7 +124,7 @@ pub fn main(init: std.process.Init) !void {
                     try event_queue.append(undefined, Event.success);
                 },
                 .confirm_user => |payload| {
-                    const result = try prompt.confirm(payload.message);
+                    const result = try display.confirm(payload.message);
                     if (result) {
                         try event_queue.append(undefined, Event.success);
                     } else {
@@ -139,8 +139,8 @@ pub fn main(init: std.process.Init) !void {
     // while (current_state != State.end) {}
 }
 
-fn exit(prompt: *Prompt) !void {
-    try prompt.message("Goodbye! Stay productive. 👋\n");
+fn exit(display: *Display) !void {
+    try display.message("Goodbye! Stay productive. 👋\n");
     std.process.exit(0);
 }
 
