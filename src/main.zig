@@ -5,6 +5,9 @@ const ansi = @import("./ansi.zig").ansi;
 const Display = @import("./display.zig").Display;
 const Timer = @import("./timer.zig").Timer;
 
+const TimeParts = @import("./timestamp.zig").TimeParts;
+const getYearMonthDay = @import("./timestamp.zig").getTimeParts;
+
 const StateMachine = @import("./state.zig").StateMachine;
 const State = @import("./state.zig").State;
 const Event = @import("./state.zig").Event;
@@ -15,6 +18,8 @@ const EventDispatcher = @import("./event_dispatcher.zig").EventDispatcher;
 const TimerError = error{ InvalidTimeFormat, MaxDurationExceeded };
 const TimeStruct = struct { minutes: u8, seconds: u8 };
 const Context = struct { duration: i64 = 0 };
+
+const task_folder = "logs";
 
 const TimerListener = struct {
     timer: *Timer,
@@ -34,7 +39,7 @@ const TimerListener = struct {
     fn writeTimer(self: *TimerListener) !void {
         const seconds = self.timer.remaining;
         const ms = try convertSecondsToTimeStruct(seconds);
-        var buffer: [100]u8 = undefined;
+        var buffer: [32]u8 = undefined;
         const message = try std.fmt.bufPrint(&buffer, "Time Remaining: {:0>2}:{:0>2}", ms);
         try self.display.message_replace(message);
     }
@@ -110,33 +115,42 @@ pub fn main(init: std.process.Init) !void {
         }
 
         while (action_queue.items.len > 0) {
-            // Pop the action
             const current_action = action_queue.items[action_queue.items.len - 1];
             action_queue.items.len -= 1;
 
             switch (current_action) {
                 .prompt_user => |payload| {
-                    const result = try display.input(payload.message);
-                    if (sm.state == State.waiting_for_time) {
-                        const time = try parseAndValidateTime(result);
+                    const user_input = try display.input(payload.message);
+                    if (sm.state == .waiting_for_time) {
+                        const time = parseAndValidateTime(user_input) catch {
+                            try event_queue.append(undefined, Event.failure);
+                            return;
+                        };
                         context.duration = time;
+                    } else if (sm.state == .waiting_for_task) {
+                        writeTask(user_input, io) catch |err| {
+                            std.log.info("writeTask: {}", .{err});
+                            try event_queue.append(undefined, Event.failure);
+                            return;
+                        };
                     }
                     try event_queue.append(undefined, Event.success);
                 },
                 .confirm_user => |payload| {
-                    const result = try display.confirm(payload.message);
-                    if (result) {
+                    const confirmed = display.confirm(payload.message) catch {
+                        try event_queue.append(undefined, Event.failure);
+                        return;
+                    };
+                    if (confirmed) {
                         try event_queue.append(undefined, Event.success);
                     } else {
-                        try event_queue.append(undefined, Event.success);
+                        try event_queue.append(undefined, Event.failure);
                     }
                 },
                 else => {},
             }
         }
     }
-
-    // while (current_state != State.end) {}
 }
 
 fn exit(display: *Display) !void {
@@ -144,9 +158,67 @@ fn exit(display: *Display) !void {
     std.process.exit(0);
 }
 
-fn writeTask(task: []const u8) !bool {
-    std.log.info("task: {s}", .{task});
-    return true;
+fn createFolder(path: []const u8, io: std.Io) !void {
+    const cwd = std.Io.Dir.cwd();
+    try cwd.createDirPath(io, path);
+}
+
+fn writeToFile(content: []const u8, path: []const u8, io: std.Io) !void {
+    const cwd = std.Io.Dir.cwd();
+    var can_write = true;
+
+    // check if the file exists or is inaccessible
+    (cwd.access(io, path, .{
+        .write = true,
+    }) catch |err| {
+        switch (err) {
+            // if the file doesn't exist it can be created
+            error.FileNotFound,
+            => can_write = false,
+            // ...but any other kind of error is an error
+            else => return err,
+        }
+    });
+
+    const out_file = (if (can_write)
+        try cwd.openFile(io, path, .{ .mode = .read_write })
+    else
+        try cwd.createFile(io, path, .{}));
+    defer out_file.close(io);
+
+    var stdout_buffer: [1024]u8 = undefined;
+    var stdout_file_writer: std.Io.File.Writer = .initStreaming(
+        out_file,
+        io,
+        &stdout_buffer,
+    );
+
+    const stdout_writer = &stdout_file_writer.interface;
+
+    // const len = try out_file.length(io);
+
+    try stdout_file_writer.seekTo(try out_file.length(io));
+
+    try stdout_writer.print("- {s}\n", .{content});
+    try stdout_writer.flush();
+}
+
+fn writeTask(task: []const u8, io: std.Io) !void {
+    //std.log.info("task: {s}", .{task});
+    const timeparts = try getYearMonthDay(io);
+
+    // check for dir
+    try createFolder(task_folder, io);
+
+    var file_buffer: [32]u8 = undefined;
+    const path = try std.fmt.bufPrint(&file_buffer, "./{s}/{d}{:0>2}{:0>2}.md", .{
+        task_folder,
+        timeparts.year,
+        timeparts.month,
+        timeparts.day,
+    });
+
+    try writeToFile(task, path, io);
 }
 
 fn convertSecondsToTimeStruct(total_seconds: i64) !TimeStruct {
