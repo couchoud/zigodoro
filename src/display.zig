@@ -32,11 +32,7 @@ pub const Display = struct {
         var buffer: [100]u8 = undefined;
         const prompt = try std.fmt.bufPrint(&buffer, "{s} (y/n)", .{value});
         const user_input = try self.input(prompt);
-        var result = false;
 
-        if (std.mem.eql(u8, user_input, "y") or std.mem.eql(u8, user_input, "yes")) {
-            result = true;
-        }
-        return result;
+        return std.mem.eql(u8, user_input, "y") or std.mem.eql(u8, user_input, "yes");
     }
 };
