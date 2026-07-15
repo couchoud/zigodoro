@@ -22,7 +22,6 @@ pub const EventDispatcher = struct {
         self.listeners.deinit(self.allocator);
     }
 
-    // Register a listener using a generic context and a typed function
     pub fn addListener(self: *EventDispatcher, comptime T: type, listener: *T, comptime callback: fn (ctx: *T, event: []const u8) void) !void {
         const wrapper = struct {
             pub fn dispatch(ctx: *anyopaque, ev: []const u8) void {
@@ -35,6 +34,18 @@ pub const EventDispatcher = struct {
             .ctx = @ptrCast(listener),
             .dispatchFn = wrapper.dispatch,
         });
+    }
+
+    pub fn removeListener(self: *EventDispatcher, listener: anytype) void {
+        const target_ctx: *anyopaque = @ptrCast(listener);
+
+        var i: usize = self.listeners.items.len;
+        while (i > 0) {
+            i -= 1;
+            if (self.listeners.items[i].ctx == target_ctx) {
+                _ = self.listeners.swapRemove(i);
+            }
+        }
     }
 
     // Trigger an event, dispatching it to all registered listeners
