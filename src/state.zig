@@ -57,7 +57,7 @@ pub const StateMachine = struct {
             .waiting_for_task => switch (event) {
                 .success => {
                     self.state = .waiting_for_restart_confirm;
-                    try action_queue.append(undefined, .{ .prompt_user = .{ .message = "Run again?" } });
+                    try action_queue.append(undefined, .{ .confirm_user = .{ .message = "Run again?" } });
                 },
                 .failure => {
                     self.state = .idle;
